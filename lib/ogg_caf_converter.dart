@@ -182,7 +182,7 @@ class OggCafConverter {
 
       final OggFile ogg = buildOggFile(
         audioData: audioData,
-        packetTable: packetTable.entries.toList(),
+        packetTable: packetTable.entries,
         channels: audioFormat.channelsPerPacket,
         preSkip: audioFormat.framesPerPacket,
         sampleRate: audioFormat.sampleRate.toInt(),
@@ -441,7 +441,7 @@ class OggCafConverter {
   }));
 
   /// Calculates the length of the packet table based on trailing data.
-  int _calculatePacketTableLength(Uint8List trailingData) {
+  int _calculatePacketTableLength(List<int> trailingData) {
     int packetTableLength = 24;
 
     for (final int value in trailingData) {
@@ -512,7 +512,7 @@ class OggCafConverter {
   CafFile _buildCafFile({
     required OggHeader header,
     required Uint8List audioData,
-    required Uint8List trailingData,
+    required List<int> trailingData,
     required int frameSize,
     Uint8List? opusHead,
   }) {
@@ -571,65 +571,57 @@ class OggCafConverter {
     ));
     log('added kuki chunk (${kuki.length} bytes)');
 
-    final int channelLayoutTag = (header.channels == 2) ? 6619138 : 6553601;
-
-    final Chunk c1 = Chunk(
-      header: ChunkHeader(
-        chunkType: ChunkTypes.channelLayout,
-        chunkSize: 12,
-      ),
-      contents: ChannelLayout(
-        channelLayoutTag: channelLayoutTag,
-        channelBitmap: 0x0,
-        numberChannelDescriptions: 0,
-        channels: <ChannelDescription>[],
-      ),
-    );
-
-    cf.chunks.add(c1);
-
-    final Chunk c2 = Chunk(
-      header: ChunkHeader(chunkType: ChunkTypes.information, chunkSize: 26),
-      contents: CAFStringsChunk(
-        numEntries: 1,
-        strings: <Information>[
-          Information(key: 'encoder\x00', value: 'Lavf59.27.100\x00')
-        ],
-      ),
-    );
-
-    cf.chunks.add(c2);
-
-    // Calculate priming frames (pre-skip) scaled to the sample rate.
-    // Opus pre-skip is always defined at 48kHz. We must scale it to the
-    // actual sample rate used in the desc chunk.
-    final int primingFrames = (header.preSkip * header.sampleRate) ~/ 48000;
-
-    // pakt (packet table) MUST precede 'data' per the CAF specification.
-    final Chunk c4 = Chunk(
+    // pakt (packet table). iOS native CAF files have primingFrames=0 —
+    // the Opus pre-skip is handled by the decoder's own bitstream
+    // parsing. This matches the structure produced by AVAudioRecorder.
+    final Chunk paktChunk = Chunk(
       header: ChunkHeader(
           chunkType: ChunkTypes.packetTable, chunkSize: packetTableLength),
       contents: PacketTable(
         header: PacketTableHeader(
           numberPackets: packets,
-          numberValidFrames: frames - primingFrames, // Valid frames excludes priming
-          primingFrames: primingFrames,
-          remainderFrames: 0, // We don't have enough info to calculate remainder accurately
+          numberValidFrames: frames,
+          primingFrames: 0,
+          remainderFrames: 0,
         ),
         entries: trailingData,
       ),
     );
 
-    cf.chunks.add(c4);
+    cf.chunks.add(paktChunk);
 
-    // 'data' chunk comes last.
-    final Chunk c3 = Chunk(
+    // Pad with a 'free' chunk so that the actual audio data bytes
+    // (data chunk header + editCount + audio) land on a 4096-byte
+    // boundary. This mirrors what iOS's AVAudioRecorder produces.
+    //
+    // Current offset = 8 (file header) + 44 (desc) + 40 (kuki)
+    //                 + 12 (pakt header) + packetTableLength (pakt payload)
+    final int offsetBeforeData = 8 + 44 + 40 + 12 + packetTableLength;
+    // data chunk header = 12 bytes, editCount = 4 bytes
+    // We want offsetBeforeData + freeHdr(12) + freePayload + dataHdr(12) + 4
+    // to be the next multiple of 4096.
+    // Simplifying: audio start = offsetBeforeData + freePayload + 28
+    // Target: (offsetBeforeData + freePayload + 28) % 4096 == 0
+    const int alignment = 4096;
+    final int audioStartTarget =
+        ((offsetBeforeData + 28 + alignment - 1) ~/ alignment) * alignment;
+    final int freePayload = audioStartTarget - offsetBeforeData - 28;
+    if (freePayload > 0) {
+      cf.chunks.add(Chunk(
+        header: ChunkHeader(
+            chunkType: FourByteString('free'), chunkSize: freePayload),
+        contents: UnknownContents(Uint8List(freePayload)),
+      ));
+    }
+
+    // 'data' chunk comes last. editCount=1 matches iOS native output.
+    final Chunk dataChunk = Chunk(
       header:
           ChunkHeader(chunkType: ChunkTypes.audioData, chunkSize: lenAudio + 4),
-      contents: AudioData(editCount: 0, data: audioData),
+      contents: AudioData(editCount: 1, data: audioData),
     );
 
-    cf.chunks.add(c3);
+    cf.chunks.add(dataChunk);
 
     return cf;
   }
@@ -739,7 +731,7 @@ class CafReader {
           log('Warning: Number of packets in header does not match the length of packet table entries (${decodedEntries.length} / $numberPackets)');
         }
 
-        return PacketTable(header: header, entries: Uint8List.fromList(decodedEntries));
+        return PacketTable(header: header, entries: decodedEntries);
       }
 
       // Move to the next chunk

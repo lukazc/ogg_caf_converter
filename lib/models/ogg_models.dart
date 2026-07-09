@@ -51,8 +51,9 @@ class OpusData {
   /// List of audio data bytes.
   final Uint8List audioData;
 
-  /// List of trailing data bytes.
-  final Uint8List trailingData;
+  /// List of packet sizes (trailing data). Values are raw Opus packet
+  /// sizes and may exceed 255 — do NOT use Uint8List for this.
+  final List<int> trailingData;
 
   /// Size of the audio frame.
   final int frameSize;
@@ -260,7 +261,7 @@ class OggReader {
 
     return OpusData(
         audioData: Uint8List.fromList(audioData),
-        trailingData: Uint8List.fromList(trailingData),
+        trailingData: trailingData,
         frameSize: frameSize);
   }
 

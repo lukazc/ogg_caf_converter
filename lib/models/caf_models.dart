@@ -278,13 +278,13 @@ class PacketTable {
   /// The header of the packet table.
   final PacketTableHeader header;
 
-  /// The list of entries in the packet table.
-  final Uint8List entries;
+  /// The list of entries in the packet table (decoded packet sizes).
+  final List<int> entries;
 
   /// Encodes the packet table to a Uint8List.
   Uint8List encode() {
     final List<Uint8List> encodedVarintEntriesChunks =
-        entries.map((int entry) => encodeVarint(entry)).toList();
+        entries.map(encodeVarint).toList();
 
     int totalLength = 24;
     for (final Uint8List encodedChunk in encodedVarintEntriesChunks) {
