@@ -38,18 +38,15 @@ void main() {
             bytes[i + 1] == kukiTag[1] &&
             bytes[i + 2] == kukiTag[2] &&
             bytes[i + 3] == kukiTag[3]) {
-          // Verify the next 8 bytes encode the size (28 bytes for Apple Opus).
+          // Verify the next 8 bytes encode the size (19 for OpusHead).
           final sizeData = ByteData.sublistView(bytes, i + 4, i + 12);
           final chunkSize = sizeData.getInt64(0);
-          expect(chunkSize, equals(28),
-              reason: 'kuki chunk size should be 28 (Apple Opus format)');
-          // Verify the data starts with the Apple Opus cookie marker.
+          expect(chunkSize, equals(19),
+              reason: 'kuki chunk size should be 19 (OpusHead)');
+          // Verify the data starts with 'OpusHead'.
           final payloadStart = i + 12;
-          final marker = ByteData.sublistView(
-                  bytes, payloadStart, payloadStart + 4)
-              .getUint32(0, Endian.little);
-          expect(marker, equals(0x00000800),
-              reason: 'kuki should start with Apple Opus cookie marker 0x00000800');
+          final magic = utf8.decode(bytes.sublist(payloadStart, payloadStart + 8));
+          expect(magic, equals('OpusHead'));
           found = true;
           break;
         }
@@ -192,10 +189,10 @@ void main() {
       final kukiIndex = _findFourCC(result, kukiTag);
       expect(kukiIndex, isNotNull,
           reason: 'kuki chunk required for iOS/macOS');
-      // Verify the chunk size is 28 bytes (Apple Opus cookie format).
+      // Verify the chunk size is 19 bytes (OpusHead).
       final size = ByteData.sublistView(result, kukiIndex! + 4, kukiIndex + 12)
           .getInt64(0);
-      expect(size, equals(28));
+      expect(size, equals(19));
     });
 
     test('throws exception for invalid OGG input file', () async {
