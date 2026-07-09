@@ -67,7 +67,8 @@ class OggHeader {
     required this.preSkip,
     required this.sampleRate,
     required this.version,
-  });
+    Uint8List? opusHead,
+  }) : opusHead = opusHead ?? Uint8List(0);
 
   /// Channel map.
   late int channelMap;
@@ -86,6 +87,10 @@ class OggHeader {
 
   /// Version.
   late int version;
+
+  /// The raw 19-byte OpusHead packet (magic cookie).
+  /// This is required for the 'kuki' chunk in CAF files on iOS/macOS.
+  final Uint8List opusHead;
 }
 
 /// Class representing the metadata for an Ogg page.
@@ -165,14 +170,6 @@ class OggReader {
       throw Exception(OggReaderError.badIDPageType);
     }
 
-    final OggHeader header = OggHeader(
-        channelMap: 0,
-        channels: 0,
-        outputGain: 0,
-        preSkip: 0,
-        sampleRate: 0,
-        version: 0);
-
     if (segments[0].length != idPagePayloadLength) {
       throw Exception(OggReaderError.badIDPageLength);
     }
@@ -180,6 +177,18 @@ class OggReader {
     if (utf8.decode(segments[0].sublist(0, 8)) != idPageSignature) {
       throw Exception(OggReaderError.badIDPagePayloadSignature);
     }
+
+    // Capture the raw OpusHead bytes for the kuki chunk.
+    final Uint8List rawOpusHead = Uint8List.fromList(segments[0]);
+
+    final OggHeader header = OggHeader(
+        channelMap: 0,
+        channels: 0,
+        outputGain: 0,
+        preSkip: 0,
+        sampleRate: 0,
+        version: 0,
+        opusHead: rawOpusHead);
 
     header
       ..version = segments[0][8]

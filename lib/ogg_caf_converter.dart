@@ -35,20 +35,33 @@ class OggCafConverter {
       String inputFile, String outputPath, bool deleteInput) async {
     final Uint8List encodedData = await _readOggToCafMemory(inputFile);
 
+    // Atomic write: write to a temp file first, then rename.
+    // This prevents data loss or corruption if the write is interrupted.
+    final File outputFile = File(outputPath);
+    final File tempFile =
+        File('$outputPath.tmp.${DateTime.now().microsecondsSinceEpoch}');
+
     try {
-      final File file = File(outputPath);
+      await tempFile.writeAsBytes(encodedData, flush: true);
 
-      if (!file.existsSync()) {
-        await file.create();
+      // If the target already exists, renameSync handles the
+      // replacement atomically (on the same filesystem).
+      if (outputFile.existsSync()) {
+        tempFile.renameSync(outputPath);
+      } else {
+        await tempFile.rename(outputPath);
       }
-
-      // Write CAF file to output path
-      await file.writeAsBytes(encodedData);
 
       if (deleteInput) {
         await File(inputFile).delete();
       }
     } catch (e, stackTrace) {
+      // Clean up temp file on failure — never leave junk behind.
+      if (tempFile.existsSync()) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
       log('Error converting OGG to CAF: $e');
       log(stackTrace.toString());
 
@@ -71,6 +84,7 @@ class OggCafConverter {
         audioData: opusData.audioData,
         trailingData: opusData.trailingData,
         frameSize: opusData.frameSize,
+        opusHead: header.opusHead.isNotEmpty ? header.opusHead : null,
       );
 
       return cf.encode();
@@ -122,22 +136,32 @@ class OggCafConverter {
 
   Future<void> _convertCafToOgg(
       String inputFile, String outputPath, bool deleteInput) async {
+    final Uint8List encodedData = await _convertCafToOggInMemory(inputFile);
+
+    // Atomic write: write to temp file first, then rename.
+    final File outputFile = File(outputPath);
+    final File tempFile =
+        File('$outputPath.tmp.${DateTime.now().microsecondsSinceEpoch}');
+
     try {
-      final Uint8List encodedData = await _convertCafToOggInMemory(inputFile);
+      await tempFile.writeAsBytes(encodedData, flush: true);
 
-      final File file = File(outputPath);
-
-      if (!file.existsSync()) {
-        await file.create();
+      if (outputFile.existsSync()) {
+        tempFile.renameSync(outputPath);
+      } else {
+        await tempFile.rename(outputPath);
       }
-
-      // Write OGG file to output path
-      await file.writeAsBytes(encodedData);
 
       if (deleteInput) {
         await File(inputFile).delete();
       }
     } catch (e, stackTrace) {
+      // Clean up temp file on failure.
+      if (tempFile.existsSync()) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
       log('Error converting CAF to OGG: $e');
       log(stackTrace.toString());
       throw Exception(e);
@@ -439,11 +463,16 @@ class OggCafConverter {
   }
 
   /// Builds a CAF file from provided data.
+  ///
+  /// If [opusHead] is provided (the 19-byte OpusHead packet from the OGG
+  /// source), a 'kuki' (magic cookie) chunk is inserted before the 'data'
+  /// chunk. This is **required** for Core Audio playback on iOS/macOS.
   CafFile _buildCafFile({
     required OggHeader header,
     required Uint8List audioData,
     required Uint8List trailingData,
     required int frameSize,
+    Uint8List? opusHead,
   }) {
     final int lenAudio = audioData.length;
     final int packets = trailingData.length;
@@ -502,6 +531,19 @@ class OggCafConverter {
     );
 
     cf.chunks.add(c2);
+
+    // Insert kuki (magic cookie) chunk BEFORE the data chunk.
+    // Core Audio on iOS/macOS requires this to decode Opus.
+    if (opusHead != null && opusHead.isNotEmpty) {
+      cf.chunks.add(Chunk(
+        header: ChunkHeader(
+            chunkType: ChunkTypes.magicCookie, chunkSize: opusHead.length),
+        contents: MagicCookie(data: opusHead),
+      ));
+      log('added kuki chunk (${opusHead.length} bytes)');
+    } else {
+      log('warning: no OpusHead available, kuki chunk omitted — CAF may not play on iOS/macOS');
+    }
 
     final Chunk c3 = Chunk(
       header:

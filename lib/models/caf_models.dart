@@ -45,8 +45,10 @@ class ChunkTypes {
 
   /// Chunk type for MIDI.
   static final FourByteString midi = FourByteString('midi');
-}
 
+  /// Chunk type for magic cookie (OpusHead).
+  static final FourByteString magicCookie = FourByteString('kuki');
+}
 /// A class representing a CAF file.
 class CafFile {
   CafFile({required this.fileHeader, required this.chunks});
@@ -168,6 +170,21 @@ class UnknownContents {
 
 /// MIDI data in a CAF file.
 typedef Midi = Uint8List;
+
+/// A class representing the magic cookie (OpusHead) in a CAF file.
+/// This is the 'kuki' chunk required by Core Audio on iOS/macOS
+/// to decode Opus audio streams.
+class MagicCookie {
+  MagicCookie({required this.data});
+
+  /// The raw OpusHead packet data (19 bytes for Opus).
+  final Uint8List data;
+
+  /// Encodes the magic cookie to a Uint8List.
+  Uint8List encode() {
+    return data;
+  }
+}
 
 /// A class representing information in a CAF file.
 class Information {
@@ -461,6 +478,9 @@ class Chunk {
     } else if (header.chunkType == ChunkTypes.packetTable) {
       final PacketTable packetTable = contents as PacketTable;
       encodedContents = packetTable.encode();
+    } else if (header.chunkType == ChunkTypes.magicCookie) {
+      final MagicCookie magicCookie = contents as MagicCookie;
+      encodedContents = magicCookie.encode();
     } else if (header.chunkType == ChunkTypes.midi) {
       final Midi midi = contents as Midi;
       encodedContents = midi;

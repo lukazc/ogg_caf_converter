@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -19,6 +20,40 @@ void main() {
       // Check if input file still exists
       expect(File(inputFile).existsSync(), isTrue);
       // Delete the output file after completing test
+      File(outputFile).deleteSync();
+    });
+
+    test('output CAF includes kuki (magic cookie) chunk for iOS', () async {
+      const String inputFile = 'test_resources/test.ogg';
+      const String outputFile = 'test_resources/test_output_kuki.caf';
+      await oggCafConverter.convertOggToCaf(
+          input: inputFile, output: outputFile);
+
+      final bytes = await File(outputFile).readAsBytes();
+      // Search for the 'kuki' FourCC in the CAF file.
+      const kukiTag = [0x6B, 0x75, 0x6B, 0x69]; // 'kuki'
+      var found = false;
+      for (var i = 0; i < bytes.length - 4; i++) {
+        if (bytes[i] == kukiTag[0] &&
+            bytes[i + 1] == kukiTag[1] &&
+            bytes[i + 2] == kukiTag[2] &&
+            bytes[i + 3] == kukiTag[3]) {
+          // Verify the next 8 bytes encode the size (19 for OpusHead).
+          final sizeData = ByteData.sublistView(bytes, i + 4, i + 12);
+          final chunkSize = sizeData.getInt64(0);
+          expect(chunkSize, equals(19),
+              reason: 'kuki chunk size should be 19 (OpusHead)');
+          // Verify the data starts with 'OpusHead'.
+          final payloadStart = i + 12;
+          final magic = utf8.decode(bytes.sublist(payloadStart, payloadStart + 8));
+          expect(magic, equals('OpusHead'));
+          found = true;
+          break;
+        }
+      }
+      expect(found, isTrue,
+          reason: 'kuki (magic cookie) chunk must be present for iOS/macOS Core Audio');
+
       File(outputFile).deleteSync();
     });
 
@@ -148,6 +183,16 @@ void main() {
           await oggCafConverter.convertOggToCafInMemory(input: inputFile);
       expect(result, isNotNull);
       expect(result.length, greaterThan(0));
+
+      // Verify the kuki chunk is present.
+      const kukiTag = [0x6B, 0x75, 0x6B, 0x69];
+      final kukiIndex = _findFourCC(result, kukiTag);
+      expect(kukiIndex, isNotNull,
+          reason: 'kuki chunk required for iOS/macOS');
+      // Verify the chunk size is 19 bytes (OpusHead).
+      final size = ByteData.sublistView(result, kukiIndex! + 4, kukiIndex + 12)
+          .getInt64(0);
+      expect(size, equals(19));
     });
 
     test('throws exception for invalid OGG input file', () async {
@@ -166,4 +211,17 @@ void main() {
       );
     });
   });
+}
+
+/// Finds the index of a FourCC tag in [bytes], or null if not found.
+int? _findFourCC(Uint8List bytes, List<int> tag) {
+  for (var i = 0; i < bytes.length - 4; i++) {
+    if (bytes[i] == tag[0] &&
+        bytes[i + 1] == tag[1] &&
+        bytes[i + 2] == tag[2] &&
+        bytes[i + 3] == tag[3]) {
+      return i;
+    }
+  }
+  return null;
 }
