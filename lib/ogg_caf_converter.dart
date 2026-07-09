@@ -182,7 +182,7 @@ class OggCafConverter {
 
       final OggFile ogg = buildOggFile(
         audioData: audioData,
-        packetTable: packetTable.entries,
+        packetTable: packetTable.entries.toList(),
         channels: audioFormat.channelsPerPacket,
         preSkip: audioFormat.framesPerPacket,
         sampleRate: audioFormat.sampleRate.toInt(),
@@ -215,7 +215,7 @@ class OggCafConverter {
   /// Builds an OGG file from provided data.
   OggFile buildOggFile({
     required Uint8List audioData,
-    required Uint8List packetTable,
+    required List<int> packetTable,
     required int channels,
     required int preSkip,
     required int sampleRate,
@@ -672,12 +672,14 @@ class CafReader {
 
         log('Packet table chunk found at offset $offset with size $chunkSize');
 
-        // Check for padding or extra bytes in the packet table
-        if (entries.length != numberPackets) {
-          log('Warning: Number of packets in header does not match the length of packet table entries (${entries.length} / $numberPackets)');
+        // Decode varint-encoded packet sizes.
+        final List<int> decodedEntries = decodeVarintEntries(entries);
+
+        if (decodedEntries.length != numberPackets) {
+          log('Warning: Number of packets in header does not match the length of packet table entries (${decodedEntries.length} / $numberPackets)');
         }
 
-        return PacketTable(header: header, entries: entries);
+        return PacketTable(header: header, entries: Uint8List.fromList(decodedEntries));
       }
 
       // Move to the next chunk

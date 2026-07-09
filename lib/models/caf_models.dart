@@ -336,6 +336,31 @@ class PacketTable {
   }
 }
 
+/// Decodes a CAF packet table varint stream into individual packet sizes.
+///
+/// CAF varint encoding: each byte uses 7 data bits (bits 0-6) and a
+/// continuation bit (bit 7). If bit 7 is set, the next byte continues
+/// the value. Bytes are read most-significant-chunk first.
+///
+/// Returns a list of decoded packet sizes.
+List<int> decodeVarintEntries(Uint8List data) {
+  final List<int> result = <int>[];
+  int i = 0;
+  while (i < data.length) {
+    int value = 0;
+    while (i < data.length) {
+      final int byte = data[i];
+      value = (value << 7) | (byte & 0x7F);
+      i++;
+      if ((byte & 0x80) == 0) {
+        break; // continuation bit clear — end of this varint
+      }
+    }
+    result.add(value);
+  }
+  return result;
+}
+
 /// A class representing the layout of channels in a CAF file.
 class ChannelLayout {
   ChannelLayout({
