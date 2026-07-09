@@ -462,11 +462,45 @@ class OggCafConverter {
     return packetTableLength;
   }
 
+  /// Builds the 28-byte Apple-format Opus magic cookie for CAF files.
+  ///
+  /// This format is what iOS's AVAudioRecorder writes when recording with
+  /// kAudioFormatOpus. Core Audio on iOS requires this exact format in the
+  /// 'kuki' chunk to decode Opus streams.
+  ///
+  /// Layout (7 x uint32 LE):
+  ///   [0] magic/flags: 0x00000800 (Apple Opus cookie marker)
+  ///   [1] sample rate (LE uint32)
+  ///   [2] frames per packet (LE uint32)
+  ///   [3] output gain (LE int32, Q7.8 format)
+  ///   [4] version (1 for OpusHead v1)
+  ///   [5..6] reserved (zeros)
+  Uint8List _buildAppleOpusKuki({
+    required int sampleRate,
+    required int framesPerPacket,
+    required int outputGainQ78,
+    required int version,
+  }) {
+    final ByteData data = ByteData(28);
+    data.setUint32(0, 0x00000800, Endian.little);
+    data.setUint32(4, sampleRate, Endian.little);
+    data.setUint32(8, framesPerPacket, Endian.little);
+    data.setInt32(12, outputGainQ78, Endian.little);
+    data.setUint32(16, version, Endian.little);
+    data.setUint32(20, 0, Endian.little);
+    data.setUint32(24, 0, Endian.little);
+    return data.buffer.asUint8List();
+  }
+
   /// Builds a CAF file from provided data.
   ///
-  /// If [opusHead] is provided (the 19-byte OpusHead packet from the OGG
-  /// source), a 'kuki' (magic cookie) chunk is inserted before the 'data'
-  /// chunk. This is **required** for Core Audio playback on iOS/macOS.
+  /// A 28-byte kuki (magic cookie) chunk is inserted immediately after the
+  /// 'desc' chunk in Apple's native Opus-in-CAF format. This format is what
+  /// iOS's AVAudioRecorder writes, and Core Audio on iOS requires it to
+  /// decode Opus streams.
+  ///
+  /// If [opusHead] is provided, it is currently unused (kept for API
+  /// compatibility) — the kuki is built from the OGG header fields instead.
   CafFile _buildCafFile({
     required OggHeader header,
     required Uint8List audioData,
@@ -505,16 +539,28 @@ class OggCafConverter {
 
     // kuki (magic cookie) must come immediately after 'desc'.
     // Core Audio on iOS/macOS requires this to initialize the Opus decoder.
-    if (opusHead != null && opusHead.isNotEmpty) {
-      cf.chunks.add(Chunk(
-        header: ChunkHeader(
-            chunkType: ChunkTypes.magicCookie, chunkSize: opusHead.length),
-        contents: MagicCookie(data: opusHead),
-      ));
-      log('added kuki chunk (${opusHead.length} bytes)');
-    } else {
-      log('warning: no OpusHead available, kuki chunk omitted — CAF may not play on iOS/macOS');
-    }
+    //
+    // We write a 28-byte kuki in Apple's native format (observed from CAF
+    // files produced by iOS's AVAudioRecorder with kAudioFormatOpus).
+    // Layout (7 x uint32 LE):
+    //   [0] magic/flags: 0x00000800 (Apple Opus cookie marker)
+    //   [1] sample rate (LE uint32)
+    //   [2] frames per packet (LE uint32)
+    //   [3] output gain (LE int32, Q7.8)
+    //   [4] version/channel mapping (1 for OpusHead v1, family 0)
+    //   [5..6] reserved (zeros)
+    final Uint8List kuki = _buildAppleOpusKuki(
+      sampleRate: header.sampleRate,
+      framesPerPacket: frameSize,
+      outputGainQ78: header.outputGain,
+      version: header.version,
+    );
+    cf.chunks.add(Chunk(
+      header: ChunkHeader(
+          chunkType: ChunkTypes.magicCookie, chunkSize: kuki.length),
+      contents: MagicCookie(data: kuki),
+    ));
+    log('added kuki chunk (${kuki.length} bytes)');
 
     final int channelLayoutTag = (header.channels == 2) ? 6619138 : 6553601;
 
