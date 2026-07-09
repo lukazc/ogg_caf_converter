@@ -503,6 +503,19 @@ class OggCafConverter {
 
     cf.chunks.add(c);
 
+    // kuki (magic cookie) must come immediately after 'desc'.
+    // Core Audio on iOS/macOS requires this to initialize the Opus decoder.
+    if (opusHead != null && opusHead.isNotEmpty) {
+      cf.chunks.add(Chunk(
+        header: ChunkHeader(
+            chunkType: ChunkTypes.magicCookie, chunkSize: opusHead.length),
+        contents: MagicCookie(data: opusHead),
+      ));
+      log('added kuki chunk (${opusHead.length} bytes)');
+    } else {
+      log('warning: no OpusHead available, kuki chunk omitted — CAF may not play on iOS/macOS');
+    }
+
     final int channelLayoutTag = (header.channels == 2) ? 6619138 : 6553601;
 
     final Chunk c1 = Chunk(
@@ -532,27 +545,7 @@ class OggCafConverter {
 
     cf.chunks.add(c2);
 
-    // Insert kuki (magic cookie) chunk BEFORE the data chunk.
-    // Core Audio on iOS/macOS requires this to decode Opus.
-    if (opusHead != null && opusHead.isNotEmpty) {
-      cf.chunks.add(Chunk(
-        header: ChunkHeader(
-            chunkType: ChunkTypes.magicCookie, chunkSize: opusHead.length),
-        contents: MagicCookie(data: opusHead),
-      ));
-      log('added kuki chunk (${opusHead.length} bytes)');
-    } else {
-      log('warning: no OpusHead available, kuki chunk omitted — CAF may not play on iOS/macOS');
-    }
-
-    final Chunk c3 = Chunk(
-      header:
-          ChunkHeader(chunkType: ChunkTypes.audioData, chunkSize: lenAudio + 4),
-      contents: AudioData(editCount: 0, data: audioData),
-    );
-
-    cf.chunks.add(c3);
-
+    // pakt (packet table) MUST precede 'data' per the CAF specification.
     final Chunk c4 = Chunk(
       header: ChunkHeader(
           chunkType: ChunkTypes.packetTable, chunkSize: packetTableLength),
@@ -568,6 +561,15 @@ class OggCafConverter {
     );
 
     cf.chunks.add(c4);
+
+    // 'data' chunk comes last.
+    final Chunk c3 = Chunk(
+      header:
+          ChunkHeader(chunkType: ChunkTypes.audioData, chunkSize: lenAudio + 4),
+      contents: AudioData(editCount: 0, data: audioData),
+    );
+
+    cf.chunks.add(c3);
 
     return cf;
   }
