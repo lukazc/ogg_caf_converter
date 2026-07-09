@@ -462,11 +462,53 @@ class OggCafConverter {
     return packetTableLength;
   }
 
+  /// Builds the 28-byte Apple-native Opus magic cookie for the 'kuki' chunk.
+  ///
+  /// CAF files (and their chunk contents written by Apple's own encoders)
+  /// are big-endian. This layout was reverse-engineered from a real CAF
+  /// produced by iOS's AVAudioRecorder (see test_resources/test.caf) and
+  /// confirmed byte-for-byte (see
+  /// "kuki bytes match the real native iOS CAF fixture" test) to match what
+  /// a real iOS device writes for the same sample rate / frames-per-packet.
+  ///
+  /// Note: [outputGain] is intentionally NOT taken from the source OGG
+  /// stream's OpusHead. Empirically, the native fixture's OpusHead has
+  /// outputGain=0 while its CAF kuki has -1000 (~-3.9 dB) — this appears to
+  /// be a fixed compensation constant that AVAudioRecorder's Opus encoder
+  /// always writes, unrelated to the source stream's own gain field. We
+  /// replicate that fixed constant rather than deriving it, since deriving
+  /// it from the wrong source previously produced an undecodable cookie.
+  Uint8List _buildAppleOpusKuki({
+    required int sampleRate,
+    required int framesPerPacket,
+  }) {
+    const int fixedOutputGain = -1000;
+
+    // ByteData defaults to big-endian, which is what CAF requires — but we
+    // set it explicitly below since getting this wrong is exactly what
+    // caused this cookie format to be rejected by AVFoundation previously.
+    final ByteData data = ByteData(28);
+    data.setUint32(0, 0x00000800); // Endian.big (default)
+    data.setUint32(4, sampleRate); // Endian.big (default)
+    data.setUint32(8, framesPerPacket); // Endian.big (default)
+    data.setInt32(12, fixedOutputGain); // Endian.big (default)
+    data.setUint32(16, 0x00000001); // Endian.big (default)
+    data.setUint32(20, 0x00000000); // Endian.big (default)
+    data.setUint32(24, 0x00000000); // Endian.big (default)
+    return data.buffer.asUint8List();
+  }
+
   /// Builds a CAF file from provided data.
   ///
-  /// If [opusHead] is provided (the 19-byte OpusHead packet from the OGG
-  /// source), a 'kuki' (magic cookie) chunk is inserted before the 'data'
-  /// chunk. This is **required** for Core Audio playback on iOS/macOS.
+  /// A 'kuki' (magic cookie) chunk is always inserted immediately after
+  /// 'desc', built from [header]'s sample rate / gain and [frameSize]. This
+  /// is **required** for Core Audio playback on iOS/macOS. See
+  /// [_buildAppleOpusKuki] for the exact byte layout.
+  ///
+  /// [opusHead] (the raw 19-byte RFC 7845 OpusHead packet) is retained on
+  /// [OggHeader] for diagnostic/round-trip purposes but is not used to build
+  /// the CAF kuki chunk — Apple's Core Audio expects its own cookie format,
+  /// not the raw Ogg identification header.
   CafFile _buildCafFile({
     required OggHeader header,
     required Uint8List audioData,
@@ -505,16 +547,29 @@ class OggCafConverter {
 
     // kuki (magic cookie) must come immediately after 'desc'.
     // Core Audio on iOS/macOS requires this to initialize the Opus decoder.
-    if (opusHead != null && opusHead.isNotEmpty) {
-      cf.chunks.add(Chunk(
-        header: ChunkHeader(
-            chunkType: ChunkTypes.magicCookie, chunkSize: opusHead.length),
-        contents: MagicCookie(data: opusHead),
-      ));
-      log('added kuki chunk (${opusHead.length} bytes)');
-    } else {
-      log('warning: no OpusHead available, kuki chunk omitted — CAF may not play on iOS/macOS');
-    }
+    //
+    // This is NOT the RFC 7845 OpusHead packet. It is Apple's own 28-byte
+    // big-endian cookie format, verified byte-for-byte against a native CAF
+    // recorded by AVAudioRecorder (test_resources/test.caf) which is known
+    // to play correctly via just_audio/AVPlayer on iOS:
+    //
+    //   offset  0 (u32 BE): 0x00000800           - fixed marker/flags
+    //   offset  4 (u32 BE): sample rate           (matches desc.sampleRate)
+    //   offset  8 (u32 BE): frames per packet     (matches desc.framesPerPacket)
+    //   offset 12 (i32 BE): -1000                 - fixed (see _buildAppleOpusKuki)
+    //   offset 16 (u32 BE): 0x00000001            - fixed
+    //   offset 20 (u32 BE): 0x00000000            - fixed
+    //   offset 24 (u32 BE): 0x00000000            - fixed
+    final Uint8List kuki = _buildAppleOpusKuki(
+      sampleRate: header.sampleRate,
+      framesPerPacket: frameSize,
+    );
+    cf.chunks.add(Chunk(
+      header: ChunkHeader(
+          chunkType: ChunkTypes.magicCookie, chunkSize: kuki.length),
+      contents: MagicCookie(data: kuki),
+    ));
+    log('added kuki chunk (${kuki.length} bytes)');
 
     final int channelLayoutTag = (header.channels == 2) ? 6619138 : 6553601;
 
