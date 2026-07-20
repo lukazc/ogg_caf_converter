@@ -212,6 +212,237 @@ class OggCafConverter {
     }
   }
 
+  /// Repairs a CAF file whose `pakt` chunk is damaged (e.g. from a crashed
+  /// AVAudioRecorder session where `numberPackets=0` despite valid Opus data
+  /// in the `data` chunk).
+  ///
+  /// This method reads the raw audio data, scans for Opus packet boundaries
+  /// using TOC (Table of Contents) byte heuristics, rebuilds the packet
+  /// table, and writes a corrected CAF file.
+  ///
+  /// [input] is the path to the damaged CAF file.
+  /// [output] is the path where the repaired CAF file will be written.
+  /// If omitted, the input file is overwritten in-place (atomically).
+  ///
+  /// Returns the number of packets found and repaired.
+  Future<int> repairCaf({
+    required String input,
+    String? output,
+  }) async {
+    final bytes = await File(input).readAsBytes();
+    final cafReader = CafReader(input);
+
+    // Extract audio format and raw audio, ignoring the broken pakt.
+    final audioFormat = cafReader.readAudioFormat(bytes);
+    final audioData = cafReader.readAudioData(bytes);
+
+    if (audioData.isEmpty) {
+      throw Exception('No audio data found in CAF file');
+    }
+
+    // Scan for Opus packet boundaries in the raw audio.
+    final packetSizes = _scanOpusPackets(audioData);
+    if (packetSizes.isEmpty) {
+      throw Exception('Could not find any Opus packet boundaries in audio data');
+    }
+
+    log('Repair: found ${packetSizes.length} packet boundaries in ${audioData.length} bytes of audio');
+
+    // Build a new CAF with the repaired packet table.
+    final cafFile = _buildRepairedCaf(
+      audioFormat: audioFormat,
+      audioData: audioData,
+      packetSizes: packetSizes,
+      originalBytes: bytes,
+    );
+
+    final outputPath = output ?? input;
+    final outputFile = File(outputPath);
+    final tempFile = File('$outputPath.tmp.${DateTime.now().microsecondsSinceEpoch}');
+
+    try {
+      await tempFile.writeAsBytes(cafFile.encode(), flush: true);
+      if (outputFile.existsSync()) {
+        tempFile.renameSync(outputPath);
+      } else {
+        await tempFile.rename(outputPath);
+      }
+    } catch (e) {
+      if (tempFile.existsSync()) {
+        try { await tempFile.delete(); } catch (_) {}
+      }
+      rethrow;
+    }
+
+    return packetSizes.length;
+  }
+
+  /// Scans raw Opus audio data for packet boundaries by detecting valid
+  /// TOC (Table of Contents) bytes at the start of each packet.
+  ///
+  /// Each Opus packet begins with a TOC byte (RFC 6716 §3.1):
+  ///   bits 7-3: configuration (0-31)
+  ///   bit 2:    stereo flag
+  ///   bits 1-0: frame count minus 1 (0, 1, or 2; 3 is invalid)
+  ///
+  /// A byte is a potential TOC if `(byte & 0x03) != 0x03`.
+  ///
+  /// The scanner uses a greedy forward-scan approach: from each confirmed
+  /// boundary, it searches forward for the next valid TOC within a
+  /// reasonable packet size range (10–4000 bytes) and accepts the first
+  /// match. For mono 20ms Opus, packet sizes typically cluster around
+  /// 15–250 bytes, making false positives unlikely in real audio data.
+  List<int> _scanOpusPackets(Uint8List data) {
+    if (data.isEmpty) return [];
+
+    // Minimum and maximum practical Opus packet sizes.
+    // Absolute minimum: 1 byte TOC for a 2.5ms CELT frame at lowest bitrate (~15 bytes).
+    // We use 10 as a conservative floor.
+    // Maximum: ~1275 bytes for 60ms 510kbps stereo, plus padding. We use 4000.
+    const int minPacketSize = 10;
+    const int maxPacketSize = 4000;
+
+    final packetSizes = <int>[];
+    int offset = 0;
+
+    while (offset < data.length) {
+      // Current position must be a valid TOC (first iteration always is,
+      // since the data chunk starts at a packet boundary).
+      final int toc = data[offset];
+
+      // Find the next packet boundary.
+      int nextOffset = offset + minPacketSize;
+      bool found = false;
+
+      // Scan forward for a valid TOC that gives a reasonable packet size.
+      final int searchEnd = (offset + maxPacketSize).clamp(0, data.length - 1);
+      for (int candidate = nextOffset; candidate <= searchEnd; candidate++) {
+        if (_isValidOpusToc(data[candidate])) {
+          nextOffset = candidate;
+          found = true;
+          break;
+        }
+      }
+
+      if (found) {
+        packetSizes.add(nextOffset - offset);
+        offset = nextOffset;
+      } else {
+        // Couldn't find another boundary — treat the rest as one packet.
+        final remaining = data.length - offset;
+        if (remaining >= minPacketSize) {
+          packetSizes.add(remaining);
+        }
+        break;
+      }
+    }
+
+    return packetSizes;
+  }
+
+  /// Returns `true` if [byte] could be a valid Opus TOC.
+  ///
+  /// Invalid condition: frame count minus 1 == 3 (`c` field = 0b11 in bits
+  /// 1–0), which would mean 4 frames in a packet — not valid per RFC 6716.
+  static bool _isValidOpusToc(int byte) {
+    return (byte & 0x03) != 0x03;
+  }
+
+  /// Builds a repaired CAF file preserving the original `desc` and `kuki`
+  /// chunks from [originalBytes], but replacing the `pakt` chunk with a new
+  /// one built from the scanned [packetSizes], and adjusting the `data`
+  /// chunk to match.
+  CafFile _buildRepairedCaf({
+    required AudioFormat audioFormat,
+    required Uint8List audioData,
+    required List<int> packetSizes,
+    required Uint8List originalBytes,
+  }) {
+    final int totalFrames = packetSizes.length * audioFormat.framesPerPacket;
+    final int packetTableLength = _calculatePacketTableLength(packetSizes);
+
+    final CafFile cf = CafFile(
+      fileHeader: FileHeader(
+          fileType: FourByteString('caff'), fileVersion: 1, fileFlags: 0),
+      chunks: <Chunk>[],
+    );
+
+    // Preserve the original desc chunk.
+    cf.chunks.add(Chunk(
+      header: ChunkHeader(
+          chunkType: ChunkTypes.audioDescription, chunkSize: 32),
+      contents: audioFormat,
+    ));
+
+    // Preserve the original kuki chunk if present.
+    final originalKuki = _extractChunk(originalBytes, 'kuki');
+    if (originalKuki != null) {
+      cf.chunks.add(Chunk(
+        header: ChunkHeader(
+            chunkType: ChunkTypes.magicCookie, chunkSize: originalKuki.length),
+        contents: MagicCookie(data: originalKuki),
+      ));
+    }
+
+    // Build new pakt.
+    cf.chunks.add(Chunk(
+      header: ChunkHeader(
+          chunkType: ChunkTypes.packetTable, chunkSize: packetTableLength),
+      contents: PacketTable(
+        header: PacketTableHeader(
+          numberPackets: packetSizes.length,
+          numberValidFrames: totalFrames,
+          primingFrames: 0,
+          remainderFrames: 0,
+        ),
+        entries: packetSizes,
+      ),
+    ));
+
+    // Calculate free padding to align audio data to 4096.
+    int offsetBeforeData = 8 + 44 + 40 + 12 + packetTableLength;
+    if (originalKuki == null) {
+      // If no kuki, the offset is smaller.
+      offsetBeforeData = 8 + 44 + 12 + packetTableLength;
+    }
+    const int alignment = 4096;
+    final int audioStartTarget =
+        ((offsetBeforeData + 28 + alignment - 1) ~/ alignment) * alignment;
+    final int freePayload = audioStartTarget - offsetBeforeData - 28;
+    if (freePayload > 0) {
+      cf.chunks.add(Chunk(
+        header: ChunkHeader(
+            chunkType: FourByteString('free'), chunkSize: freePayload),
+        contents: UnknownContents(Uint8List(freePayload)),
+      ));
+    }
+
+    // Data chunk.
+    cf.chunks.add(Chunk(
+      header: ChunkHeader(
+          chunkType: ChunkTypes.audioData, chunkSize: audioData.length + 4),
+      contents: AudioData(editCount: 1, data: audioData),
+    ));
+
+    return cf;
+  }
+
+  /// Extracts the payload of a named chunk from raw CAF bytes, or null if
+  /// not found.
+  static Uint8List? _extractChunk(Uint8List bytes, String fourCc) {
+    int offset = 8; // skip file header
+    while (offset + 12 <= bytes.length) {
+      final String chunkType = utf8.decode(bytes.sublist(offset, offset + 4));
+      final int chunkSize =
+          ByteData.sublistView(bytes, offset + 4, offset + 12).getInt64(0);
+      if (chunkType == fourCc) {
+        return bytes.sublist(offset + 12, offset + 12 + chunkSize);
+      }
+      offset += 12 + chunkSize;
+    }
+    return null;
+  }
+
   /// Builds an OGG file from provided data.
   OggFile buildOggFile({
     required Uint8List audioData,

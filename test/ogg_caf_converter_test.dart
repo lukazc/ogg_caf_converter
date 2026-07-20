@@ -247,6 +247,63 @@ void main() {
       );
     });
   });
+
+  group('repairCaf', () {
+    final OggCafConverter oggCafConverter = OggCafConverter();
+
+    test('repairs a crashed CAF with broken pakt (numberPackets=0)', () async {
+      // Take the working native iOS CAF and corrupt its pakt chunk.
+      const original = 'test_resources/Thursday_at_19_08.caf';
+      const corrupted = 'test_resources/_repair_crashed.caf';
+
+      final bytes = await File(original).readAsBytes();
+
+      // Find the pakt chunk and zero out numberPackets + numberValidFrames.
+      const paktTag = [0x70, 0x61, 0x6B, 0x74]; // 'pakt'
+      final paktIdx = _findFourCC(bytes, paktTag);
+      expect(paktIdx, isNotNull, reason: 'pakt chunk must exist in fixture');
+      // pakt header is 12 bytes; first 8 bytes of payload = numberPackets.
+      final paktPayloadStart = paktIdx! + 12;
+      // Zero out numberPackets (8 bytes) + numberValidFrames (8 bytes).
+      final corruptedBytes = Uint8List.fromList(bytes);
+      for (var i = 0; i < 16; i++) {
+        corruptedBytes[paktPayloadStart + i] = 0;
+      }
+      await File(corrupted).writeAsBytes(corruptedBytes);
+
+      try {
+        // Verify the corrupted file has numberPackets=0.
+        final corruptedRaw = await File(corrupted).readAsBytes();
+        final cpIdx = _findFourCC(corruptedRaw, paktTag)!;
+        final np = ByteData.sublistView(corruptedRaw, cpIdx + 12, cpIdx + 20)
+            .getUint64(0);
+        expect(np, equals(0), reason: 'corrupted pakt should have numberPackets=0');
+
+        // Repair it.
+        const repaired = 'test_resources/_repair_repaired.caf';
+        final packetCount = await oggCafConverter.repairCaf(
+          input: corrupted,
+          output: repaired,
+        );
+        expect(packetCount, greaterThan(0),
+            reason: 'should find at least one valid Opus packet');
+
+        // The repaired file should have a non-zero numberPackets.
+        final repairedBytes = await File(repaired).readAsBytes();
+        final rpIdx = _findFourCC(repairedBytes, paktTag)!;
+        final repairedNp =
+            ByteData.sublistView(repairedBytes, rpIdx + 12, rpIdx + 20)
+                .getUint64(0);
+        expect(repairedNp, greaterThan(0),
+            reason: 'repaired pakt should have numberPackets > 0');
+
+        // Clean up.
+        await File(repaired).delete();
+      } finally {
+        await File(corrupted).delete();
+      }
+    });
+  });
 }
 
 /// Finds the index of a FourCC tag in [bytes], or null if not found.
