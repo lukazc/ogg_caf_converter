@@ -374,15 +374,20 @@ class OggCafConverter {
       contents: audioFormat,
     ));
 
-    // Preserve the original kuki chunk if present.
+    // Preserve the original kuki chunk if present; otherwise build one
+    // from the audio format description (crashed CAF files lack a kuki
+    // because AVAudioRecorder writes it only on stop()).
     final originalKuki = _extractChunk(originalBytes, 'kuki');
-    if (originalKuki != null) {
-      cf.chunks.add(Chunk(
-        header: ChunkHeader(
-            chunkType: ChunkTypes.magicCookie, chunkSize: originalKuki.length),
-        contents: MagicCookie(data: originalKuki),
-      ));
-    }
+    final Uint8List kuki = originalKuki ??
+        _buildAppleOpusKuki(
+          sampleRate: audioFormat.sampleRate.toInt(),
+          framesPerPacket: audioFormat.framesPerPacket,
+        );
+    cf.chunks.add(Chunk(
+      header: ChunkHeader(
+          chunkType: ChunkTypes.magicCookie, chunkSize: kuki.length),
+      contents: MagicCookie(data: kuki),
+    ));
 
     // Build new pakt.
     cf.chunks.add(Chunk(
@@ -400,11 +405,8 @@ class OggCafConverter {
     ));
 
     // Calculate free padding to align audio data to 4096.
-    int offsetBeforeData = 8 + 44 + 40 + 12 + packetTableLength;
-    if (originalKuki == null) {
-      // If no kuki, the offset is smaller.
-      offsetBeforeData = 8 + 44 + 12 + packetTableLength;
-    }
+    final int offsetBeforeData =
+        8 + 44 + 12 + kuki.length + 12 + packetTableLength;
     const int alignment = 4096;
     final int audioStartTarget =
         ((offsetBeforeData + 28 + alignment - 1) ~/ alignment) * alignment;
@@ -428,7 +430,8 @@ class OggCafConverter {
   }
 
   /// Extracts the payload of a named chunk from raw CAF bytes, or null if
-  /// not found.
+  /// not found. Stops searching when it encounters the 'data' chunk since
+  /// nothing follows it in a well-formed CAF.
   static Uint8List? _extractChunk(Uint8List bytes, String fourCc) {
     int offset = 8; // skip file header
     while (offset + 12 <= bytes.length) {
@@ -436,8 +439,15 @@ class OggCafConverter {
       final int chunkSize =
           ByteData.sublistView(bytes, offset + 4, offset + 12).getInt64(0);
       if (chunkType == fourCc) {
-        return bytes.sublist(offset + 12, offset + 12 + chunkSize);
+        final int payloadLen =
+            (chunkSize > 0 && offset + 12 + chunkSize <= bytes.length)
+                ? chunkSize
+                : (bytes.length - offset - 12).clamp(0, bytes.length);
+        return bytes.sublist(offset + 12, offset + 12 + payloadLen);
       }
+      // Stop at the data chunk — audio data bytes are not valid chunk headers
+      // and trying to parse them as FourCC will throw FormatException.
+      if (chunkType == 'data') break;
       offset += 12 + chunkSize;
     }
     return null;
