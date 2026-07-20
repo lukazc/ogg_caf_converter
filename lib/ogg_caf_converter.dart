@@ -894,15 +894,23 @@ class CafReader {
       log('Chunk type: $chunkType, Chunk size: $chunkSize');
 
       if (chunkType == 'data') {
-        // We found the audio data chunk
-        final int editCount =
-            ByteData.sublistView(Uint8List.fromList(bytes), offset, offset + 4)
-                .getUint32(0);
-        offset += 4;
+        // We found the audio data chunk.
+        // When AVAudioRecorder crashes mid-recording, the data chunk size
+        // may be 0 or -1 (a placeholder never finalized by stop()). In that
+        // case, read all remaining bytes as audio.
+        final int effectiveSize = (chunkSize > 0 && offset + chunkSize <= bytes.length)
+            ? chunkSize
+            : (bytes.length - offset);
+
+        final int editCount = (effectiveSize >= 4)
+            ? ByteData.sublistView(Uint8List.fromList(bytes), offset, offset + 4)
+                .getUint32(0)
+            : 0;
+        if (effectiveSize >= 4) offset += 4;
 
         final Uint8List audioData = bytes.sublist(offset,
-            offset + chunkSize - 4); // Subtract 4 bytes for the edit count
-        log('Audio data chunk found at offset $offset with size $chunkSize, edit count: $editCount');
+            offset + effectiveSize - 4);
+        log('Audio data chunk found at offset $offset with size $chunkSize (effective: $effectiveSize), edit count: $editCount');
         return audioData;
       }
 
