@@ -1,5 +1,5 @@
 import Flutter
-import AVFAudio
+import AVFoundation
 
 /// The Flutter plugin class for ogg_caf_converter.
 ///
@@ -79,9 +79,7 @@ class OpusDecoder {
         guard let converter = makeConverter() else {
             return Array(repeating: false, count: packets.count)
         }
-        guard let outFormat = converter.outputFormat else {
-            return Array(repeating: false, count: packets.count)
-        }
+        let outFormat = converter.outputFormat
 
         var results = [NSNumber]()
         for packet in packets {
@@ -105,7 +103,7 @@ class OpusDecoder {
         let inBuffer = AVAudioCompressedBuffer(
             format: converter.inputFormat,
             packetCapacity: 1,
-            maximumPacketSize: UInt32(packet.count)
+            maximumPacketSize: packet.count
         )
         packet.copyBytes(
             to: inBuffer.data.assumingMemoryBound(to: UInt8.self),
@@ -119,15 +117,14 @@ class OpusDecoder {
         }
 
         var error: NSError?
-        let status = converter.convert(
-            to: outBuffer,
-            error: &error
-        ) { packetCount, inputStatus in
+        converter.convert(to: outBuffer, error: &error) { _, inputStatus in
             inputStatus.pointee = .haveData
             return inBuffer
         }
 
-        return status != .error
+        // convert() returns Bool in newer AVFAudio (false on error).
+        // Check error pointer as a fallback for older API surfaces.
+        return error == nil
     }
 
     // MARK: - Private
