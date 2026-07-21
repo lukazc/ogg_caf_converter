@@ -3,10 +3,11 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'flutter_stub.dart'
+    if (dart.library.ui) 'package:flutter/services.dart';
+
 import 'models/caf_models.dart';
 import 'models/ogg_models.dart';
-import 'src/opus_decode_stub.dart'
-    if (dart.library.ui) 'src/opus_decode_channel.dart';
 import 'utils/logger.dart';
 
 /// A class for converting OPUS audio data to and from OGG and CAF container formats.
@@ -214,9 +215,6 @@ class OggCafConverter {
     }
   }
 
-  /// [decodeBatch] is the decode verification callback.  In a Flutter
-  /// app, pass a closure wrapping `OpusDecodeChannel.decodePackets`.
-  /// In tests, pass an `OpusFfiDecoder.decodeBatch` closure.
   Future<int> repairCaf({
     required String input,
     String? output,
@@ -224,7 +222,6 @@ class OggCafConverter {
     final bytes = await File(input).readAsBytes();
     final cafReader = CafReader(input);
 
-    // Extract audio format and raw audio, ignoring the broken pakt.
     final audioFormat = cafReader.readAudioFormat(bytes);
     final audioData = cafReader.readAudioData(bytes);
 
@@ -237,12 +234,15 @@ class OggCafConverter {
         'ch=${audioFormat.channelsPerPacket}, '
         'fpp=${audioFormat.framesPerPacket}');
 
-    // Decode-verified boundary walk via iOS AVAudioConverter.
-    final packetSizes = await _repairWalk(
-      audioData,
-      channels: audioFormat.channelsPerPacket,
-      sampleRate: audioFormat.sampleRate,
-      framesPerPacket: audioFormat.framesPerPacket,
+    // Single channel call — the entire decode-verified walk runs natively.
+    const channel = MethodChannel('ogg_caf_converter');
+    final packetSizes = List<int>.from(
+      await channel.invokeMethod('repairWalk', {
+        'audio': audioData,
+        'sampleRate': audioFormat.sampleRate,
+        'channels': audioFormat.channelsPerPacket,
+        'framesPerPacket': audioFormat.framesPerPacket,
+      }),
     );
 
     if (packetSizes.isEmpty) {
@@ -255,7 +255,6 @@ class OggCafConverter {
         'min=${packetSizes.reduce((a,b)=>a<b?a:b)}, '
         'max=${packetSizes.reduce((a,b)=>a>b?a:b)}');
 
-    // Build a new CAF with the repaired packet table.
     final cafFile = _buildRepairedCaf(
       audioFormat: audioFormat,
       audioData: audioData,
@@ -284,158 +283,6 @@ class OggCafConverter {
     }
 
     return packetSizes.length;
-  }
-
-  /// Decode-verified boundary walk.
-  ///
-  /// Starts at byte 0 (guaranteed real packet start in a CAF data chunk).
-  /// At each step, generates TOC-valid candidates, verifies each via
-  /// [decodeBatch] + short lookahead, and commits the first verified
-  /// boundary.  Candidates matching the dominant TOC byte pattern in the
-  /// stream are preferred as tie-breakers.
-  Future<List<int>> _repairWalk(
-    Uint8List data, {
-    required int channels,
-    required double sampleRate,
-    required int framesPerPacket,
-  }) async {
-    if (data.isEmpty) return [];
-
-    const int minPacketSize = 10;
-    const int maxPacketSize = 2000;
-    const int lookahead = 2;
-    final bool expectMono = channels == 1;
-
-    // Pre-scan: identify dominant TOC byte values for tie-breaking.
-    final tocHistogram = List<int>.filled(256, 0);
-    for (int i = 0; i < data.length; i++) {
-      if (_isValidOpusToc(data[i], expectMono: expectMono)) {
-        tocHistogram[data[i]]++;
-      }
-    }
-    final dominantToc = <int>{};
-    for (int round = 0; round < 3; round++) {
-      int best = 0, bestIdx = 0;
-      for (int j = 0; j < 256; j++) {
-        if (tocHistogram[j] > best) {
-          best = tocHistogram[j];
-          bestIdx = j;
-        }
-      }
-      if (best > 0) {
-        dominantToc.add(bestIdx);
-        tocHistogram[bestIdx] = 0;
-      }
-    }
-    log('Repair walk: dominant TOC values: $dominantToc');
-
-    // Helper: attempt decode via platform channel.
-    Future<bool> tryDecode(List<Uint8List> packets) async {
-      try {
-        final results = await OpusDecodeChannel.decodePackets(
-          packets: packets,
-          sampleRate: sampleRate,
-          channels: channels,
-          framesPerPacket: framesPerPacket,
-        );
-        return results.isNotEmpty && results.every((r) => r);
-      } catch (e) {
-        log('Repair walk: decode error: $e');
-        return false;
-      }
-    }
-
-    final sizes = <int>[];
-    int offset = 0;
-    int step = 0;
-
-    while (offset < data.length) {
-      step++;
-      int bestPos = -1;
-      bool bestHasDominantToc = false;
-
-      for (int pos = offset + minPacketSize;
-          pos <= offset + maxPacketSize && pos < data.length;
-          pos++) {
-        if (!_isValidOpusToc(data[pos], expectMono: expectMono)) continue;
-
-        final bool hasDominantToc = dominantToc.contains(data[pos]);
-
-        // Build candidate + lookahead packets.
-        final candidatePackets = <Uint8List>[];
-        candidatePackets.add(Uint8List.sublistView(data, offset, pos));
-
-        int laOffset = pos;
-        for (int la = 0;
-            la < lookahead && laOffset < data.length;
-            la++) {
-          int laPos = -1;
-          for (int p = laOffset + minPacketSize;
-              p <= laOffset + maxPacketSize && p < data.length;
-              p++) {
-            if (_isValidOpusToc(data[p], expectMono: expectMono)) {
-              laPos = p;
-              break;
-            }
-          }
-          if (laPos > 0) {
-            candidatePackets.add(
-                Uint8List.sublistView(data, laOffset, laPos));
-            laOffset = laPos;
-          } else {
-            break;
-          }
-        }
-
-        // Decode-verify.
-        final ok = await tryDecode(candidatePackets);
-        if (ok) {
-          if (bestPos < 0 || (hasDominantToc && !bestHasDominantToc)) {
-            bestPos = pos;
-            bestHasDominantToc = hasDominantToc;
-          }
-        }
-      }
-
-      if (bestPos > 0) {
-        final int size = bestPos - offset;
-        sizes.add(size);
-        if (step <= 5 || step % 50 == 0) {
-          log('Repair walk: step $step offset=$offset size=$size '
-              'dominantToc=$bestHasDominantToc');
-        }
-        offset = bestPos;
-      } else {
-        // No valid continuation found.
-        throw Exception(
-            'Repair walk failed at offset $offset: no decode-verified '
-            'candidate found in next $maxPacketSize bytes of '
-            '${data.length}-byte audio stream.  The decode callback '
-            'may be failing or the audio data is irrecoverably corrupted.');
-      }
-    }
-
-    log('Repair walk: complete — ${sizes.length} packets in $step steps');
-    return sizes;
-  }
-
-  /// Returns `true` if [byte] could be a valid Opus TOC byte.
-  ///
-  /// Validates per RFC 6716 §3.1:
-  ///   - Frame count code c ≠ 3 (4 frames per packet is invalid)
-  ///   - If [expectMono] is true, stereo flag s must be 0
-  ///
-  /// Note: we intentionally do NOT reject config values 20-31
-  /// (RFC "reserved") because AVAudioRecorder's Opus encoder can use
-  /// them in practice.
-  static bool _isValidOpusToc(int byte, {bool expectMono = false}) {
-    // c field (bits 1-0): frame count minus 1; 3 is invalid (RFC 6716 §3.1)
-    if ((byte & 0x03) == 0x03) return false;
-
-    // s field (bit 2): must be 0 for mono streams
-    if (expectMono && ((byte >> 2) & 1) != 0) return false;
-
-    return true;
   }
 
   /// Builds a repaired CAF file preserving the original `desc` and `kuki`

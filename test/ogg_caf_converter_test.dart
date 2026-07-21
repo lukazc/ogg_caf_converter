@@ -247,21 +247,8 @@ void main() {
     });
   });
 
-  group('repairCaf', () {
-    final OggCafConverter oggCafConverter = OggCafConverter();
-
-    test('repairCaf throws outside Flutter (no platform channel)', () async {
-      // repairCaf calls the platform channel internally.  In plain dart
-      // test, the stub throws UnsupportedError.
-      expect(
-        () => oggCafConverter.repairCaf(
-          input: 'test_resources/ios_record_corrupted_by_crash.caf',
-          output: 'test_resources/_repair_stub.caf',
-        ),
-        throwsA(isA<Exception>()),
-      );
-    });
-  });
+  // repairCaf is tested via flutter test integration_test/ on iOS.
+  // It cannot run under plain dart test (requires Flutter MethodChannel).
 }
 
 /// Finds the index of a FourCC tag in [bytes], or null if not found.
