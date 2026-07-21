@@ -77,7 +77,9 @@ void main() {
       // Run the decode-verified walk directly.
       final sizes = _decodeVerifiedWalk(
         audio,
-        decodeBatch: (packets) => decoder.decodeBatch(packets),
+        decodeBatch: (packets,
+                  {double? sampleRate, int? channels, int? framesPerPacket}) =>
+            decoder.decodeBatch(packets),
         channels: audioFormat.channelsPerPacket,
       );
 
@@ -122,7 +124,9 @@ void main() {
 
       final sizes = _decodeVerifiedWalk(
         audio,
-        decodeBatch: (packets) => decoder.decodeBatch(packets),
+        decodeBatch: (packets,
+                {double? sampleRate, int? channels, int? framesPerPacket}) =>
+            decoder.decodeBatch(packets),
         channels: audioFormat.channelsPerPacket,
       );
 
@@ -158,7 +162,9 @@ void main() {
 
       final sizes = _decodeVerifiedWalk(
         audio,
-        decodeBatch: (packets) => decoder.decodeBatch(packets),
+        decodeBatch: (packets,
+                {double? sampleRate, int? channels, int? framesPerPacket}) =>
+            decoder.decodeBatch(packets),
         channels: 1,
       );
 
@@ -187,7 +193,8 @@ void main() {
 // FFI decoder for local testing without a Flutter app context.
 // ---------------------------------------------------------------------------
 
-typedef DecodeBatchFn = List<bool> Function(List<Uint8List> packets);
+typedef DecodeBatchFn = List<bool> Function(List<Uint8List> packets,
+    {double sampleRate, int channels, int framesPerPacket});
 
 /// Walk the raw Opus elementary stream starting from byte 0,
 /// committing to boundaries verified by real Opus decode via [decodeBatch].

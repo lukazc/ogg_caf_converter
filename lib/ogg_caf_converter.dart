@@ -5,15 +5,9 @@ import 'dart:typed_data';
 
 import 'models/caf_models.dart';
 import 'models/ogg_models.dart';
+import 'src/opus_decode_stub.dart'
+    if (dart.library.ui) 'src/opus_decode_channel.dart';
 import 'utils/logger.dart';
-
-/// Callback for Opus decode verification.
-///
-/// Given a list of raw Opus packets, return `true` if ALL decoded
-/// successfully.  In a Flutter app, wire this to a closure wrapping
-/// `OpusDecodeChannel.decodePackets`.  In dev/CI tests, use
-/// `OpusFfiDecoder.decodeBatch`.
-typedef DecodeBatchCallback = Future<bool> Function(List<Uint8List> packets);
 
 /// A class for converting OPUS audio data to and from OGG and CAF container formats.
 class OggCafConverter {
@@ -226,7 +220,6 @@ class OggCafConverter {
   Future<int> repairCaf({
     required String input,
     String? output,
-    required DecodeBatchCallback decodeBatch,
   }) async {
     final bytes = await File(input).readAsBytes();
     final cafReader = CafReader(input);
@@ -244,11 +237,12 @@ class OggCafConverter {
         'ch=${audioFormat.channelsPerPacket}, '
         'fpp=${audioFormat.framesPerPacket}');
 
-    // Decode-verified boundary walk via injected decode callback.
+    // Decode-verified boundary walk via iOS AVAudioConverter.
     final packetSizes = await _repairWalk(
       audioData,
       channels: audioFormat.channelsPerPacket,
-      decodeBatch: decodeBatch,
+      sampleRate: audioFormat.sampleRate,
+      framesPerPacket: audioFormat.framesPerPacket,
     );
 
     if (packetSizes.isEmpty) {
@@ -302,7 +296,8 @@ class OggCafConverter {
   Future<List<int>> _repairWalk(
     Uint8List data, {
     required int channels,
-    required DecodeBatchCallback decodeBatch,
+    required double sampleRate,
+    required int framesPerPacket,
   }) async {
     if (data.isEmpty) return [];
 
@@ -334,10 +329,16 @@ class OggCafConverter {
     }
     log('Repair walk: dominant TOC values: $dominantToc');
 
-    // Helper: attempt decode via injected callback.
+    // Helper: attempt decode via platform channel.
     Future<bool> tryDecode(List<Uint8List> packets) async {
       try {
-        return await decodeBatch(packets);
+        final results = await OpusDecodeChannel.decodePackets(
+          packets: packets,
+          sampleRate: sampleRate,
+          channels: channels,
+          framesPerPacket: framesPerPacket,
+        );
+        return results.isNotEmpty && results.every((r) => r);
       } catch (e) {
         log('Repair walk: decode error: $e');
         return false;

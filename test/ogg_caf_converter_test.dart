@@ -250,13 +250,13 @@ void main() {
   group('repairCaf', () {
     final OggCafConverter oggCafConverter = OggCafConverter();
 
-    test('repairCaf propagates decode errors from callback', () async {
-      // Verify decode failures are propagated.
+    test('repairCaf throws outside Flutter (no platform channel)', () async {
+      // repairCaf calls the platform channel internally.  In plain dart
+      // test, the stub throws UnsupportedError.
       expect(
         () => oggCafConverter.repairCaf(
           input: 'test_resources/ios_record_corrupted_by_crash.caf',
           output: 'test_resources/_repair_stub.caf',
-          decodeBatch: (_) async => throw Exception('simulated decode failure'),
         ),
         throwsA(isA<Exception>()),
       );
