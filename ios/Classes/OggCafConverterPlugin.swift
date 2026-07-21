@@ -165,9 +165,9 @@ class OpusStatefulDecoder {
     }
 
     func tryDecode(packet: Data) -> Bool {
-        guard let inBuffer = AVAudioCompressedBuffer(
+        let inBuffer = AVAudioCompressedBuffer(
             format: converter.inputFormat, packetCapacity: 1, maximumPacketSize: packet.count
-        ) else { return false }
+        )
 
         inBuffer.packetDescriptions!.pointee = AudioStreamPacketDescription(
             mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(packet.count)
