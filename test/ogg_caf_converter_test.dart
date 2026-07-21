@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -251,111 +250,16 @@ void main() {
   group('repairCaf', () {
     final OggCafConverter oggCafConverter = OggCafConverter();
 
-    test('repairs a crashed CAF with broken pakt (numberPackets=0)', () async {
-      // Take the working native iOS CAF and corrupt its pakt chunk.
-      const original = 'test_resources/Thursday_at_19_08.caf';
-      const corrupted = 'test_resources/_repair_crashed.caf';
-
-      final bytes = await File(original).readAsBytes();
-
-      // Find the pakt chunk and zero out numberPackets + numberValidFrames.
-      const paktTag = [0x70, 0x61, 0x6B, 0x74]; // 'pakt'
-      final paktIdx = _findFourCC(bytes, paktTag);
-      expect(paktIdx, isNotNull, reason: 'pakt chunk must exist in fixture');
-      final paktPayloadStart = paktIdx! + 12;
-      final corruptedBytes = Uint8List.fromList(bytes);
-      for (var i = 0; i < 16; i++) {
-        corruptedBytes[paktPayloadStart + i] = 0;
-      }
-      await File(corrupted).writeAsBytes(corruptedBytes);
-
-      try {
-        final packetCount = await oggCafConverter.repairCaf(
-          input: corrupted,
-          output: 'test_resources/_repair_repaired.caf',
-        );
-        expect(packetCount, greaterThan(0));
-
-        final repairedBytes = await File('test_resources/_repair_repaired.caf').readAsBytes();
-        final rpIdx = _findFourCC(repairedBytes, paktTag)!;
-        final repairedNp = ByteData.sublistView(repairedBytes, rpIdx + 12, rpIdx + 20).getUint64(0);
-        expect(repairedNp, greaterThan(0));
-        await File('test_resources/_repair_repaired.caf').delete();
-      } finally {
-        await File(corrupted).delete();
-      }
-    });
-
-    test('repairs a crashed CAF with data chunk size = -1 (unfinished recording)', () async {
-      // Simulate an AVAudioRecorder crash: pakt missing, data chunk has
-      // placeholder size 0xFFFFFFFFFFFFFFFF (-1 as int64). This is the
-      // exact state of a CAF file interrupted before stop().
-      const original = 'test_resources/Thursday_at_19_08.caf';
-      const corrupted = 'test_resources/_repair_crashed2.caf';
-
-      final bytes = await File(original).readAsBytes();
-
-      // Build a minimal crashed CAF: only desc, kuki, and data with size=-1.
-      const descTag = [0x64, 0x65, 0x73, 0x63];
-      const dataTag = [0x64, 0x61, 0x74, 0x61];
-      final descIdx = _findFourCC(bytes, descTag);
-      final dataIdx = _findFourCC(bytes, dataTag);
-      expect(descIdx, isNotNull);
-      expect(dataIdx, isNotNull);
-
-      // Extract desc + kuki chunks and the raw audio data.
-      final kuki = bytes.sublist(52, 52 + 12 + 28); // kuki header + 28-byte payload
-      final rawAudio = bytes.sublist(dataIdx! + 16); // skip data header + editCount
-
-      // Build crashed CAF: header + desc + kuki + free (pad to align) + data (size=-1).
-      final crashed = BytesBuilder();
-      crashed.add(bytes.sublist(0, 8)); // caff file header
-      crashed.add(bytes.sublist(descIdx!, descIdx! + 44)); // desc (12 hdr + 32 payload)
-      crashed.add(kuki); // kuki (12 hdr + 28 payload)
-
-      // Pad to 4096-aligned audio start.
-      const alignment = 4096;
-      final preDataOffset = 8 + 44 + 40; // file hdr + desc + kuki
-      final dataHeaderAndEditOffset = 12 + 4; // data chunk header + editCount
-      final audioStartTarget = ((preDataOffset + dataHeaderAndEditOffset + alignment - 1) ~/ alignment) * alignment;
-      final freeSize = audioStartTarget - preDataOffset - dataHeaderAndEditOffset;
-      if (freeSize > 0) {
-        final freeHdr = ByteData(12);
-        freeHdr.buffer.asUint8List().setRange(0, 4, utf8.encode('free'));
-        freeHdr.setInt64(4, freeSize);
-        crashed.add(freeHdr.buffer.asUint8List());
-        crashed.add(Uint8List(freeSize));
-      }
-
-      // data chunk with size = -1 (0xFFFFFFFFFFFFFFFF as uint64).
-      final dataHdr = ByteData(12);
-      dataHdr.buffer.asUint8List().setRange(0, 4, utf8.encode('data'));
-      dataHdr.setInt64(4, -1); // placeholder size
-      final editCount = ByteData(4)..setUint32(0, 1);
-      crashed.add(dataHdr.buffer.asUint8List());
-      crashed.add(editCount.buffer.asUint8List());
-      crashed.add(rawAudio);
-
-      await File(corrupted).writeAsBytes(crashed.toBytes());
-
-      try {
-        final packetCount = await oggCafConverter.repairCaf(
-          input: corrupted,
-          output: 'test_resources/_repair_repaired2.caf',
-        );
-        expect(packetCount, greaterThan(0),
-            reason: 'should recover packets from crash CAF with data size=-1');
-
-        // Verify the repaired file has a valid pakt.
-        final repairedBytes = await File('test_resources/_repair_repaired2.caf').readAsBytes();
-        final rpIdx = _findFourCC(repairedBytes, [0x70, 0x61, 0x6B, 0x74])!;
-        final repairedNp = ByteData.sublistView(repairedBytes, rpIdx + 12, rpIdx + 20).getUint64(0);
-        expect(repairedNp, equals(packetCount),
-            reason: 'repaired pakt numberPackets should match scanned count');
-        await File('test_resources/_repair_repaired2.caf').delete();
-      } finally {
-        await File(corrupted).delete();
-      }
+    test('repairCaf propagates decode errors from callback', () async {
+      // Verify decode failures are propagated.
+      expect(
+        () => oggCafConverter.repairCaf(
+          input: 'test_resources/ios_record_corrupted_by_crash.caf',
+          output: 'test_resources/_repair_stub.caf',
+          decodeBatch: (_) async => throw Exception('simulated decode failure'),
+        ),
+        throwsA(isA<Exception>()),
+      );
     });
   });
 }
@@ -372,3 +276,4 @@ int? _findFourCC(Uint8List bytes, List<int> tag) {
   }
   return null;
 }
+

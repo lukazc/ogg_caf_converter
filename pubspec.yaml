@@ -1,15 +1,15 @@
 name: ogg_caf_converter
-version: 0.1.4
-description: Converts OPUS audio files between OGG and CAF container formats using pure dart.
+version: 0.2.0
+description: Converts OPUS audio files between OGG and CAF container formats and repairs crashed AVAudioRecorder CAF files via iOS decode verification.
 homepage: https://github.com/jt274/ogg_caf_converter
 repository: https://github.com/jt274/ogg_caf_converter
 issue_tracker: https://github.com/jt274/ogg_caf_converter/issues
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.0.0'
 
 platforms:
-  android:
   ios:
 
 topics:
@@ -20,11 +20,22 @@ topics:
   - opus
 
 dependencies:
+  ffi: ^2.0.0
+  flutter:
+    sdk: flutter
   meta: ^1.0.0
 
 dev_dependencies:
   flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter
   test: ^1.25.14
+
+flutter:
+  plugin:
+    platforms:
+      ios:
+        pluginClass: OggCafConverterPlugin
 
 funding:
   - https://www.paypal.com/ncp/payment/HFAXZ7CTFQC6L
