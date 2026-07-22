@@ -668,8 +668,8 @@ class OggCafConverter {
     ]);
   }
 
-  final Uint8List _crcLookupTable =
-      Uint8List.fromList(List<int>.generate(256, (int i) {
+  final Uint32List _crcLookupTable =
+      Uint32List.fromList(List<int>.generate(256, (int i) {
     int r = i << 24;
     for (int j = 0; j < 8; j++) {
       if (r & 0x80000000 != 0) {
