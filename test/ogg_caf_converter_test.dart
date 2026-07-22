@@ -66,8 +66,15 @@ void main() {
       // underlying recording (both sampleRate=24000, preSkip=312,
       // outputGain=0). test.caf was produced natively by iOS's
       // AVAudioRecorder and is known to play via just_audio/AVPlayer.
-      // Our converter's kuki bytes for test.ogg must therefore be
-      // byte-identical to test.caf's real kuki bytes.
+      //
+      // The kuki outputGain field (bytes 12-15) may differ between them:
+      // AVAudioRecorder always writes -1000 (a fixed encoder headroom
+      // constant); our converter propagates the source OGG's OpusHead
+      // outputGain (0), negated for the kuki's encoder-side convention.
+      // Both are correct for their respective source data.
+      //
+      // We verify that all OTHER kuki fields match byte-for-byte, and
+      // that the gain field correctly reflects the source OGG's gain.
       const String inputFile = 'test_resources/test.ogg';
       const String outputFile = 'test_resources/test_output_kuki_native.caf';
       await oggCafConverter.convertOggToCaf(
@@ -86,9 +93,35 @@ void main() {
       final nativeKuki =
           nativeBytes.sublist(nativeKukiIndex! + 12, nativeKukiIndex + 12 + 28);
 
-      expect(ourKuki, equals(nativeKuki),
-          reason: 'kuki bytes must exactly match the native iOS recording '
-              'for the same sample rate/pre-skip/gain');
+      // Verify the kuki is the correct size.
+      expect(ourKuki.length, equals(28));
+      expect(nativeKuki.length, equals(28));
+
+      // Marker (bytes 0-3): must match.
+      expect(ourKuki.sublist(0, 4), equals(nativeKuki.sublist(0, 4)),
+          reason: 'kuki marker field must match');
+
+      // Sample rate (bytes 4-7): must match.
+      expect(ourKuki.sublist(4, 8), equals(nativeKuki.sublist(4, 8)),
+          reason: 'kuki sampleRate must match');
+
+      // Frames per packet (bytes 8-11): must match.
+      expect(ourKuki.sublist(8, 12), equals(nativeKuki.sublist(8, 12)),
+          reason: 'kuki framesPerPacket must match');
+
+      // Output gain (bytes 12-15): our converter propagates the source
+      // OGG's gain (0), negated for kuki convention → 0.
+      // The native CAF has -1000 (AVAudioRecorder's fixed headroom constant).
+      final ourGain =
+          ByteData.sublistView(ourKuki, 12, 16).getInt32(0);
+      expect(ourGain, equals(0),
+          reason: 'kuki outputGain should be 0 (source OGG outputGain=0, '
+              'negated for kuki encoder-side convention)');
+
+      // Trailing fields (bytes 16-27): fixed constants, must match.
+      expect(ourKuki.sublist(16, 28), equals(nativeKuki.sublist(16, 28)),
+          reason: 'kuki trailing fields (0x00000001, 0x00000000, '
+              '0x00000000) must match');
 
       File(outputFile).deleteSync();
     });

@@ -201,7 +201,7 @@ class OggReader {
               .getUint32(0, Endian.little)
       ..outputGain =
           ByteData.sublistView(Uint8List.fromList(segments[0]), 16, 18)
-              .getUint16(0, Endian.little)
+              .getInt16(0, Endian.little)
       ..channelMap = segments[0][18];
 
     return header;

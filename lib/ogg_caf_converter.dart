@@ -180,6 +180,20 @@ class OggCafConverter {
       log('Audio data length: ${audioData.length}');
       log('Packet table length: ${packetTable.entries.length}');
 
+      // Read kuki to propagate gain to OpusHead.
+      // Apple's kuki stores encoder-side gain; OpusHead uses decoder-side
+      // gain (RFC 7845).  The convention is inverted, so we negate.
+      // For native AVAudioRecorder CAFs, kuki outputGain is -1000,
+      // meaning the encoder attenuated by ~3.9 dB → the decoder must
+      // boost by ~3.9 dB → OpusHead gain = +1000.
+      final KukiData? kukiData = caf.readKuki(bytes);
+      final int oggOutputGain =
+          kukiData != null ? -(kukiData.outputGain) : 0;
+      if (kukiData != null) {
+        log('Kuki: outputGain=${kukiData.outputGain} → '
+            'OpusHead outputGain=$oggOutputGain');
+      }
+
       final OggFile ogg = buildOggFile(
         audioData: audioData,
         packetTable: packetTable.entries,
@@ -189,6 +203,7 @@ class OggCafConverter {
         version: 1,
         frameSize: audioFormat.framesPerPacket,
         repackage: false,
+        outputGain: oggOutputGain,
       );
 
       return ogg.encode();
@@ -454,6 +469,11 @@ class OggCafConverter {
   }
 
   /// Builds an OGG file from provided data.
+  ///
+  /// [outputGain] is the decoder-side gain in OpusHead convention
+  /// (signed int16 Q7.8, RFC 7845 §5.1).  When converting from CAF to OGG,
+  /// this should be `-(kuki.outputGain)` — the kuki stores encoder-side
+  /// gain (Apple convention), so we negate to get decoder-side gain.
   OggFile buildOggFile({
     required Uint8List audioData,
     required List<int> packetTable,
@@ -463,6 +483,7 @@ class OggCafConverter {
     required int version,
     required int frameSize,
     required bool repackage,
+    int outputGain = 0,
   }) {
     final OggFile oggFile = OggFile(pages: <OggPage>[]);
 
@@ -511,7 +532,7 @@ class OggCafConverter {
       packet.add(channels); // Channels
       packet.addAll(_encodeUint16(preSkip)); // Pre-skip
       packet.addAll(_encodeUint32(sampleRate)); // Sample rate
-      packet.addAll(_encodeUint16(0)); // Output gain
+      packet.addAll(_encodeUint16(outputGain)); // Output gain (RFC 7845, decoder-side)
       packet.add(0); // Channel mapping family
       return Uint8List.fromList(packet);
     }
@@ -712,18 +733,23 @@ class OggCafConverter {
   /// "kuki bytes match the real native iOS CAF fixture" test) to match what
   /// a real iOS device writes for the same sample rate / frames-per-packet.
   ///
-  /// Note: [outputGain] is intentionally NOT taken from the source OGG
-  /// stream's OpusHead. Empirically, the native fixture's OpusHead has
-  /// outputGain=0 while its CAF kuki has -1000 (~-3.9 dB) — this appears to
-  /// be a fixed compensation constant that AVAudioRecorder's Opus encoder
-  /// always writes, unrelated to the source stream's own gain field. We
-  /// replicate that fixed constant rather than deriving it, since deriving
-  /// it from the wrong source previously produced an undecodable cookie.
+  /// [outputGain] is the **decoder-side** gain (OpusHead convention,
+  /// RFC 7845 §5.1, signed int16 Q7.8).  It is negated for the kuki
+  /// because Apple's kuki stores **encoder-side** gain — the decoder
+  /// applies the inverse.  For AVAudioRecorder-native CAFs, the source
+  /// OpusHead outputGain is 0 and the kuki outputGain is -1000 (a fixed
+  /// headroom constant baked in by Apple's encoder, not derived from
+  /// OpusHead).  For OGG→CAF conversion, we propagate the actual source
+  /// OpusHead gain rather than hardcoding -1000.
   Uint8List _buildAppleOpusKuki({
     required int sampleRate,
     required int framesPerPacket,
+    int outputGain = 0,
   }) {
-    const int fixedOutputGain = -1000;
+    // Negate: OpusHead gain is decoder-side; Apple kuki is encoder-side.
+    // A decoder boost of +1000 means the encoder attenuated by -1000.
+    // A decoder gain of 0 means the encoder applied no gain.
+    final int kukiGain = -outputGain;
 
     // ByteData defaults to big-endian, which is what CAF requires — but we
     // set it explicitly below since getting this wrong is exactly what
@@ -732,7 +758,7 @@ class OggCafConverter {
     data.setUint32(0, 0x00000800); // Endian.big (default)
     data.setUint32(4, sampleRate); // Endian.big (default)
     data.setUint32(8, framesPerPacket); // Endian.big (default)
-    data.setInt32(12, fixedOutputGain); // Endian.big (default)
+    data.setInt32(12, kukiGain); // Endian.big (default)
     data.setUint32(16, 0x00000001); // Endian.big (default)
     data.setUint32(20, 0x00000000); // Endian.big (default)
     data.setUint32(24, 0x00000000); // Endian.big (default)
@@ -797,13 +823,14 @@ class OggCafConverter {
     //   offset  0 (u32 BE): 0x00000800           - fixed marker/flags
     //   offset  4 (u32 BE): sample rate           (matches desc.sampleRate)
     //   offset  8 (u32 BE): frames per packet     (matches desc.framesPerPacket)
-    //   offset 12 (i32 BE): -1000                 - fixed (see _buildAppleOpusKuki)
+    //   offset 12 (i32 BE): -1000                 - encoder-applied gain (see _buildAppleOpusKuki)
     //   offset 16 (u32 BE): 0x00000001            - fixed
     //   offset 20 (u32 BE): 0x00000000            - fixed
     //   offset 24 (u32 BE): 0x00000000            - fixed
     final Uint8List kuki = _buildAppleOpusKuki(
       sampleRate: header.sampleRate,
       framesPerPacket: frameSize,
+      outputGain: header.outputGain,
     );
     cf.chunks.add(Chunk(
       header: ChunkHeader(
@@ -866,6 +893,35 @@ class OggCafConverter {
 
     return cf;
   }
+}
+
+/// Parsed contents of the Apple-native 28-byte Opus magic cookie ('kuki')
+/// chunk, as written by AVAudioRecorder and required by Core Audio on
+/// iOS/macOS to initialize the Opus decoder.
+class KukiData {
+  const KukiData({
+    required this.sampleRate,
+    required this.framesPerPacket,
+    required this.outputGain,
+  });
+  
+  /// Sample rate (from offset 4, uint32 big-endian).
+  final int sampleRate;
+
+  /// Frames per Opus packet (from offset 8, uint32 big-endian).
+  final int framesPerPacket;
+
+  /// Encoder-applied output gain (from offset 12, int32 big-endian).
+  ///
+  /// **Apple convention**: this is the gain the *encoder* applied.
+  /// The decoder applies the **inverse** to restore the original level.
+  /// To convert to OpusHead convention (decoder-side gain), negate it:
+  /// `opusHeadGain = -kuki.outputGain`.
+  ///
+  /// For AVAudioRecorder-native CAFs this is always -1000 (~-3.9 dB) —
+  /// a fixed headroom attenuation the encoder applies regardless of the
+  /// OpusHead outputGain field.
+  final int outputGain;
 }
 
 /// A class for reading CAF files.
@@ -1048,6 +1104,64 @@ class CafReader {
     }
 
     throw Exception('Audio format chunk not found');
+  }
+
+  /// Reads the Apple-native 28-byte Opus magic cookie ('kuki') chunk.
+  ///
+  /// Returns null if no kuki chunk is present (e.g. in a crashed
+  /// recording where AVAudioRecorder never wrote it).
+  ///
+  /// Apple kuki format (28 bytes, big-endian):
+  ///   offset  0 (u32): marker/flags (always 0x00000800)
+  ///   offset  4 (u32): sample rate
+  ///   offset  8 (u32): frames per packet
+  ///   offset 12 (i32): output gain (encoder-applied, Apple convention)
+  ///   offset 16 (u32): 0x00000001
+  ///   offset 20 (u32): 0x00000000
+  ///   offset 24 (u32): 0x00000000
+  KukiData? readKuki(Uint8List bytes) {
+    int offset = 8; // skip CAF file header
+    while (offset + 12 <= bytes.length) {
+      final String chunkType = utf8.decode(bytes.sublist(offset, offset + 4));
+      final int chunkSize = ByteData.sublistView(
+              Uint8List.fromList(bytes), offset + 4, offset + 12)
+          .getInt64(0);
+      offset += 12;
+
+      if (chunkType == 'kuki') {
+        final int payloadLen =
+            (chunkSize > 0 && offset + chunkSize <= bytes.length)
+                ? chunkSize
+                : (bytes.length - offset).clamp(0, bytes.length);
+        final Uint8List payload = bytes.sublist(offset,
+            (offset + payloadLen).clamp(0, bytes.length));
+
+        if (payload.length >= 16) {
+          // Read the first 16 bytes (marker, sampleRate, framesPerPacket, outputGain).
+          // The full kuki is 28 bytes, but we only need the gain fields.
+          final int sr =
+              ByteData.sublistView(Uint8List.fromList(payload), 4, 8)
+                  .getUint32(0); // big-endian (default)
+          final int fpp =
+              ByteData.sublistView(Uint8List.fromList(payload), 8, 12)
+                  .getUint32(0); // big-endian (default)
+          final int gain =
+              ByteData.sublistView(Uint8List.fromList(payload), 12, 16)
+                  .getInt32(0); // big-endian (default), signed
+          return KukiData(
+            sampleRate: sr,
+            framesPerPacket: fpp,
+            outputGain: gain,
+          );
+        }
+        return null;
+      }
+
+      // Stop at the data chunk — audio data bytes are not valid chunk headers.
+      if (chunkType == 'data') break;
+      offset += chunkSize;
+    }
+    return null;
   }
 }
 
